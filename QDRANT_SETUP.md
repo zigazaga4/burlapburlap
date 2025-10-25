@@ -146,11 +146,17 @@ GET /api/test-sessions-stats
         {
           role: "tester" | "lawyer",
           content: "message content",
-          timestamp: "ISO 8601 timestamp"
+          timestamp: "ISO 8601 timestamp",
+          turn: 1
         }
       ],
-      score: 8.5,
-      reasoning: "evaluation reasoning"
+      evaluation: {
+        score: 8.5,
+        coverage: "yes" | "partial" | "no",
+        accuracy: "good" | "fair" | "poor",
+        completeness: "complete" | "partial" | "incomplete",
+        reasoning: "evaluation reasoning"
+      }
     }
   ],
   

@@ -1,6 +1,6 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 
-const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
+const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6335';
 const COLLECTION_NAME = 'test_sessions';
 const VECTOR_SIZE = 128; // Simple vector size for basic storage
 
@@ -78,9 +78,9 @@ function generateDummyVector() {
 /**
  * Save a complete test session to Qdrant
  * Stores everything needed to reconstruct the 3-panel view:
- * - Panel 1 (Left): Task Creator conversation
- * - Panel 2 (Middle): Generated tasks with scores
- * - Panel 3 (Right): Task Executor <-> Lawyer AI conversations
+ * - Panel 1 (Left): Task Creator conversation + task completion messages
+ * - Panel 2 (Middle): Generated tasks
+ * - Panel 3 (Right): Task Executor <-> Lawyer AI conversations with evaluations
  */
 export async function saveTestSession(sessionData) {
   try {
@@ -92,9 +92,9 @@ export async function saveTestSession(sessionData) {
       // Panel 1: Task Creator conversation
       taskCreatorConversation,  // Array of {role: 'user'|'assistant', content: string, timestamp: string}
       // Panel 2: Generated tasks
-      generatedTasks,  // Array of {id, description, timestamp, score?, reasoning?}
+      generatedTasks,  // Array of {id, description, timestamp}
       // Panel 3: Task execution results
-      taskExecutions,  // Array of {taskId, conversation: [{role: 'tester'|'lawyer', content: string, timestamp: string}], score, reasoning}
+      taskExecutions,  // Array of {taskId, conversation: [{role: 'tester'|'lawyer', content: string, timestamp: string, turn: number}], evaluation: {score, coverage, accuracy, completeness, reasoning}}
       // Overall metrics
       overallScore,
       totalTasks,

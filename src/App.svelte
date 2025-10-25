@@ -23,7 +23,7 @@
   let showTestsPanel = $state(false);
   let selectedPastSession = $state(null);
 
-  const WS_URL = 'ws://localhost:17000';
+  const WS_URL = 'ws://localhost:17001';
 
   marked.setOptions({
     breaks: true,
@@ -101,6 +101,10 @@
         addConversationEndMarker(data.task, data.turns, data.reason);
         break;
 
+      case 'task_evaluation':
+        addTaskEvaluation(data.task, data.evaluation);
+        break;
+
       case 'agent_stream':
         handleAgentStream(data.agent, data.chunk);
         break;
@@ -155,10 +159,18 @@
       case 'task_completed':
         if (data.result && data.result.evaluation) {
           const evaluation = data.result.evaluation;
+          // Add score summary to left panel
           addSystemMessage(
             `Task ${data.progress.current}/${data.progress.total} completed - Score: ${evaluation.score}/10 (Coverage: ${evaluation.coverage}, Accuracy: ${evaluation.accuracy})`,
             'info'
           );
+          // Add detailed evaluation message to left panel
+          if (evaluation.reasoning) {
+            addSystemMessage(
+              `Tester evaluation: ${evaluation.reasoning}`,
+              'info'
+            );
+          }
         }
         break;
 
@@ -314,6 +326,23 @@
     scrollToBottom();
   }
 
+  function addTaskEvaluation(task, evaluation) {
+    const evaluationText = `✓ Task completed\n${evaluation.reasoning || 'Task evaluation complete'}`;
+
+    testingMessages = [...testingMessages, {
+      id: `eval_${task.id}_${Date.now()}`,
+      type: 'evaluation',
+      agent: 'task_executor',
+      task,
+      text: evaluationText,
+      html: marked(evaluationText),
+      evaluation: evaluation,
+      messageType: 'evaluation',
+      timestamp: new Date().toLocaleTimeString()
+    }];
+    scrollToBottomTesting();
+  }
+
   function addSystemMessage(text, level = 'info') {
     messages = [...messages, {
       id: Date.now(),
@@ -397,10 +426,150 @@
     expandedTasks = new Set(expandedTasks);
   }
 
-  function handleSessionSelect(session) {
+  async function handleSessionSelect(session) {
     selectedPastSession = session;
-    // TODO: Implement 3-panel view for displaying the selected session
     logger.info('Selected session: ' + session.sessionId);
+
+    try {
+      // Fetch full session data from API
+      const response = await fetch(`http://localhost:17001/api/test-sessions/${session.sessionId}`);
+      const data = await response.json();
+
+      if (!data.success) {
+        logger.error('Failed to load session: ' + data.error);
+        return;
+      }
+
+      const fullSession = data.session;
+      logger.info('Loaded full session data');
+
+      // Clear current state
+      messages = [];
+      tasks = [];
+      testingMessages = [];
+      expandedTasks = new Set();
+
+      // Panel 1: Load Task Creator conversation into messages
+      if (fullSession.taskCreatorConversation) {
+        fullSession.taskCreatorConversation.forEach(msg => {
+          messages.push({
+            type: 'agent',
+            agent: msg.role === 'user' ? 'user' : 'task_creator',
+            text: msg.content,
+            html: marked(msg.content),
+            timestamp: new Date(msg.timestamp).toLocaleTimeString(),
+            messageType: msg.role === 'user' ? 'user' : 'response'
+          });
+        });
+      }
+
+      // Panel 2: Load generated tasks
+      if (fullSession.generatedTasks) {
+        tasks = fullSession.generatedTasks.map(task => ({
+          id: task.id,
+          description: task.description,
+          priority: 'high'
+        }));
+      }
+
+      // Panel 3: Load task executions into testing messages
+      if (fullSession.taskExecutions) {
+        fullSession.taskExecutions.forEach((execution, idx) => {
+          const task = fullSession.generatedTasks.find(t => t.id === execution.taskId);
+
+          // Add task separator
+          testingMessages.push({
+            type: 'task_separator',
+            task: task || { id: execution.taskId, description: 'Task ' + execution.taskId },
+            timestamp: new Date().toLocaleTimeString()
+          });
+
+          // Add conversation messages
+          if (execution.conversation) {
+            execution.conversation.forEach(msg => {
+              testingMessages.push({
+                type: 'conversation',
+                agent: msg.role === 'tester' ? 'task_executor' : 'home_chat_ai',
+                text: msg.content,
+                html: marked(msg.content),
+                timestamp: new Date(msg.timestamp).toLocaleTimeString(),
+                messageType: msg.role === 'tester' ? 'question' : 'response',
+                task: task || { id: execution.taskId }
+              });
+            });
+          }
+
+          // Add completion marker
+          testingMessages.push({
+            type: 'task_end',
+            task: task || { id: execution.taskId },
+            turns: execution.conversation?.length || 0,
+            reason: execution.completionReason || 'Task completed',
+            timestamp: new Date().toLocaleTimeString()
+          });
+
+          // Add evaluation message
+          if (execution.evaluation) {
+            const evaluationText = `✓ Task completed\n${execution.evaluation.reasoning || 'Task evaluation complete'}`;
+            testingMessages.push({
+              type: 'evaluation',
+              agent: 'task_executor',
+              task: task || { id: execution.taskId },
+              text: evaluationText,
+              html: marked(evaluationText),
+              evaluation: execution.evaluation,
+              messageType: 'evaluation',
+              timestamp: new Date().toLocaleTimeString()
+            });
+          }
+
+          // Add task completion message to left panel (messages)
+          if (execution.evaluation) {
+            const evaluation = execution.evaluation;
+            messages.push({
+              type: 'system',
+              level: 'info',
+              text: `Task ${idx + 1}/${fullSession.taskExecutions.length} completed - Score: ${evaluation.score}/10 (Coverage: ${evaluation.coverage}, Accuracy: ${evaluation.accuracy})`,
+              timestamp: new Date().toLocaleTimeString()
+            });
+            // Add detailed evaluation reasoning message
+            if (evaluation.reasoning) {
+              messages.push({
+                type: 'system',
+                level: 'info',
+                text: `Tester evaluation: ${evaluation.reasoning}`,
+                timestamp: new Date().toLocaleTimeString()
+              });
+            }
+          }
+
+          // Auto-expand this task
+          expandedTasks.add(execution.taskId);
+        });
+
+        expandedTasks = new Set(expandedTasks);
+
+        // Add final summary message to left panel
+        if (fullSession.averageScore !== undefined) {
+          messages.push({
+            type: 'system',
+            level: 'success',
+            text: `All ${fullSession.totalTasks} tasks completed! Average score: ${fullSession.averageScore.toFixed(1)}/10`,
+            timestamp: new Date().toLocaleTimeString()
+          });
+        }
+      }
+
+      // Show the testing panel
+      showTestingPanel = true;
+
+      // Close the tests panel
+      showTestsPanel = false;
+
+      logger.info('Session loaded into 3-panel view');
+    } catch (error) {
+      logger.error('Error loading session: ' + error.message);
+    }
   }
 
   // Group testing messages by task

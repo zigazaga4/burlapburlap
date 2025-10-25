@@ -1,4 +1,4 @@
-const LOG_ENDPOINT = 'http://localhost:17000/log';
+const LOG_ENDPOINT = 'http://localhost:17001/log';
 
 class Logger {
   constructor() {

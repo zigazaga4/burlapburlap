@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync } from 'fs';
 import dotenv from 'dotenv';
+import { randomUUID } from 'crypto';
 import {
   initializeCollection,
   saveTestSession,
@@ -490,17 +491,14 @@ Current conversation context: ${JSON.stringify(this.gatheredInfo)}`;
       .join('\n');
 
     const messages = [
-      new SystemMessage(`You are an expert task planner. Based on the conversation history, create a comprehensive list of tasks for testing the lawyer AI agent.
+      new SystemMessage(`You are an expert task planner. Based on the conversation history, create tasks for testing the lawyer AI agent.
 
-Generate as many tasks as needed - there is NO LIMIT. Create 3, 10, 50, or even 100+ tasks if that's what's required to thoroughly test the lawyer agent.
+CRITICAL INSTRUCTION: You MUST follow the user's explicit instructions about the number of tasks to create. If the user says "1 task", create EXACTLY 1 task. If they say "5 tasks", create EXACTLY 5 tasks. If they say "small test", create 1-3 tasks. The user's instruction is ABSOLUTE and MUST be followed precisely.
 
 Each task should be specific and actionable. For example, if testing defamation laws:
 - Task 1: Test understanding of actual malice standard for public figures
 - Task 2: Test knowledge of statute of limitations for defamation claims
 - Task 3: Test ability to distinguish between libel and slander
-- Task 4: Test understanding of truth as an absolute defense
-- Task 5: Test knowledge of qualified privilege defenses
-... and so on
 
 Return a JSON array where each task has:
 - id: unique identifier (sequential numbers)
@@ -509,7 +507,7 @@ Return a JSON array where each task has:
 - category: the legal area being tested
 
 Return ONLY a valid JSON array, no other text.`),
-      new HumanMessage(`Conversation history:\n${conversationSummary}\n\nCreate comprehensive tasks for testing the lawyer agent based on this conversation.`)
+      new HumanMessage(`Conversation history:\n${conversationSummary}\n\nCreate tasks for testing the lawyer agent based on this conversation. REMEMBER: Follow the user's explicit instructions about the number of tasks EXACTLY.`)
     ];
 
     try {
@@ -629,9 +627,19 @@ Return ONLY valid JSON, no other text.`)
 
         const evaluation = await this.evaluateResponse(taskData, executionPlan, conversationResult.fullConversation);
 
+        // Send evaluation results to frontend
+        await orchestrator.sendUpdate({
+          type: 'task_evaluation',
+          task: taskData,
+          evaluation: evaluation,
+          timestamp: new Date().toISOString()
+        });
+
         return {
           question: executionPlan.question,
           response: conversationResult.fullConversation,
+          conversation: conversationResult.conversationHistory,
+          completionReason: conversationResult.completionReason,
           evaluation: evaluation,
           status: 'completed',
           turns: conversationResult.turns
@@ -661,6 +669,7 @@ Return ONLY valid JSON, no other text.`)
     let currentQuestion = executionPlan.question;
     let turns = 0;
     const maxTurns = 10;
+    let completionReason = '';
 
     await orchestrator.sendUpdate({
       type: 'task_conversation_start',
@@ -705,12 +714,13 @@ Return ONLY valid JSON, no other text.`)
       );
 
       if (!shouldContinue.continue) {
-        log(`Task Executor: Conversation complete after ${turns} turns. Reason: ${shouldContinue.reason}`);
+        completionReason = shouldContinue.reason;
+        log(`Task Executor: Conversation complete after ${turns} turns. Reason: ${completionReason}`);
         await orchestrator.sendUpdate({
           type: 'task_conversation_end',
           task: taskData,
           turns: turns,
-          reason: shouldContinue.reason,
+          reason: completionReason,
           timestamp: new Date().toISOString()
         });
         break;
@@ -722,7 +732,8 @@ Return ONLY valid JSON, no other text.`)
     }
 
     if (turns >= maxTurns) {
-      log(`Task Executor: Reached maximum turns (${maxTurns}) for task ${taskData.id}`, 'WARN');
+      completionReason = `Reached maximum turns (${maxTurns})`;
+      log(`Task Executor: ${completionReason} for task ${taskData.id}`, 'WARN');
     }
 
     const fullConversation = conversationHistory
@@ -732,7 +743,8 @@ Return ONLY valid JSON, no other text.`)
     return {
       fullConversation,
       turns,
-      conversationHistory
+      conversationHistory,
+      completionReason
     };
   }
 
@@ -799,8 +811,9 @@ Provide a brief evaluation with:
 - accuracy: does the response seem legally sound? (good/fair/poor)
 - completeness: is the response thorough? (complete/partial/incomplete)
 - score: overall score 1-10
+- reasoning: a brief explanation of your evaluation (1-2 sentences)
 
-Return JSON only.`),
+Return JSON only with all 5 fields.`),
       new HumanMessage(`Task: ${taskData.description}
 Question asked: ${executionPlan.question}
 Expected topics: ${JSON.stringify(executionPlan.expected_topics || [])}
@@ -808,7 +821,7 @@ Expected topics: ${JSON.stringify(executionPlan.expected_topics || [])}
 Lawyer's response:
 ${lawyerResponse}
 
-Evaluate this response. Return ONLY valid JSON.`)
+Evaluate this response. Return ONLY valid JSON with fields: coverage, accuracy, completeness, score, reasoning.`)
     ];
 
     try {
@@ -1155,19 +1168,24 @@ class MultiAgentOrchestrator {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
 
+    const summary = {
+      totalTasks: this.tasks.length,
+      completedTasks: results.filter(r => r.result.status === 'completed').length,
+      averageScore: results.reduce((sum, r) => sum + (r.result.evaluation?.score || 0), 0) / results.length
+    };
+
     await this.sendUpdate({
       type: 'all_tasks_completed',
       results: results,
       status: 'completed',
-      summary: {
-        totalTasks: this.tasks.length,
-        completedTasks: results.filter(r => r.result.status === 'completed').length,
-        averageScore: results.reduce((sum, r) => sum + (r.result.evaluation?.score || 0), 0) / results.length
-      },
+      summary: summary,
       timestamp: new Date().toISOString()
     });
 
     log('Orchestrator: All tasks completed');
+
+    await this.saveTestSessionToDatabase(results, summary);
+
     return results;
   }
 
@@ -1176,6 +1194,72 @@ class MultiAgentOrchestrator {
       this.ws.send(JSON.stringify(data));
     } catch (error) {
       log('Error sending update: ' + error.message, 'ERROR');
+    }
+  }
+
+  async saveTestSessionToDatabase(results, summary) {
+    try {
+      const sessionId = randomUUID();
+      const timestamp = new Date().toISOString();
+
+      const taskCreatorConversation = this.taskCreator.conversationHistory.map(msg => ({
+        role: msg._getType() === 'human' ? 'user' : 'assistant',
+        content: msg.content,
+        timestamp: timestamp
+      }));
+
+      const generatedTasks = this.tasks.map(task => ({
+        id: task.id,
+        description: task.description,
+        timestamp: timestamp
+      }));
+
+      const taskExecutions = results.map(r => {
+        const conversation = (r.result.conversation || []).map(msg => ({
+          role: msg.role === 'executor' ? 'tester' : 'lawyer',
+          content: msg.message,
+          timestamp: timestamp,
+          turn: msg.turn
+        }));
+
+        return {
+          taskId: r.task.id,
+          conversation: conversation,
+          completionReason: r.result.completionReason || '',
+          evaluation: {
+            score: r.result.evaluation?.score || 0,
+            coverage: r.result.evaluation?.coverage || 'unknown',
+            accuracy: r.result.evaluation?.accuracy || 'unknown',
+            completeness: r.result.evaluation?.completeness || 'unknown',
+            reasoning: r.result.evaluation?.reasoning || ''
+          }
+        };
+      });
+
+      const sessionData = {
+        sessionId,
+        agentType: this.agentType,
+        country: this.country,
+        timestamp,
+        taskCreatorConversation,
+        generatedTasks,
+        taskExecutions,
+        overallScore: summary.averageScore,
+        totalTasks: summary.totalTasks,
+        completedTasks: summary.completedTasks,
+        averageScore: summary.averageScore
+      };
+
+      log(`Orchestrator: Saving test session to database: ${sessionId}`);
+      const saveResult = await saveTestSession(sessionData);
+
+      if (saveResult.success) {
+        log(`Orchestrator: Test session saved successfully: ${sessionId}`);
+      } else {
+        log(`Orchestrator: Failed to save test session: ${saveResult.error}`, 'ERROR');
+      }
+    } catch (error) {
+      log(`Orchestrator: Error saving test session: ${error.message}`, 'ERROR');
     }
   }
 
