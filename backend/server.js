@@ -7,6 +7,20 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { readFileSync } from 'fs';
+import dotenv from 'dotenv';
+import {
+  initializeCollection,
+  saveTestSession,
+  getTestSession,
+  getAllTestSessions,
+  searchTestSessions,
+  filterTestSessions,
+  deleteTestSession,
+  getTestSessionStats
+} from './test-sessions-db.js';
+
+// Load environment variables from .env file
+dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.env') });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -106,8 +120,18 @@ try {
 app.use(express.json());
 
 app.use((req, res, next) => {
+  log(`[CORS] ${req.method} ${req.url} from ${req.headers.origin || 'unknown'}`);
+
   res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    log(`[CORS] Handling OPTIONS preflight for ${req.url}`);
+    return res.status(200).end();
+  }
+
   next();
 });
 
@@ -117,6 +141,95 @@ app.get('/health', (req, res) => {
     activeConnections: wss.clients.size,
     timestamp: new Date().toISOString()
   });
+});
+
+// Test Sessions API Endpoints
+
+// Get all test sessions
+app.get('/api/test-sessions', async (req, res) => {
+  try {
+    log(`[API] GET /api/test-sessions - limit: ${req.query.limit}, offset: ${req.query.offset}`);
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = parseInt(req.query.offset) || 0;
+    const result = await getAllTestSessions(limit, offset);
+    log(`[API] Returning ${result.sessions?.length || 0} sessions`);
+    res.json(result);
+  } catch (error) {
+    log(`Error getting test sessions: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get a specific test session by ID
+app.get('/api/test-sessions/:id', async (req, res) => {
+  try {
+    const result = await getTestSession(req.params.id);
+    if (result.success) {
+      res.json(result);
+    } else {
+      res.status(404).json(result);
+    }
+  } catch (error) {
+    log(`Error getting test session: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Search test sessions
+app.get('/api/test-sessions/search/:query', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const result = await searchTestSessions(req.params.query, limit);
+    res.json(result);
+  } catch (error) {
+    log(`Error searching test sessions: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Filter test sessions
+app.post('/api/test-sessions/filter', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const result = await filterTestSessions(req.body, limit);
+    res.json(result);
+  } catch (error) {
+    log(`Error filtering test sessions: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Save a test session
+app.post('/api/test-sessions', async (req, res) => {
+  try {
+    const result = await saveTestSession(req.body);
+    res.json(result);
+  } catch (error) {
+    log(`Error saving test session: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Delete a test session
+app.delete('/api/test-sessions/:id', async (req, res) => {
+  try {
+    const result = await deleteTestSession(req.params.id);
+    res.json(result);
+  } catch (error) {
+    log(`Error deleting test session: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get test session statistics
+app.get('/api/test-sessions-stats', async (req, res) => {
+  try {
+    const result = await getTestSessionStats();
+    res.json(result);
+  } catch (error) {
+    log(`Error getting test session stats: ${error.message}`, 'ERROR');
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 const FRONTEND_LOG_FILE = path.join(LOG_DIR, `frontend-${new Date().toISOString().split('T')[0]}.log`);
@@ -1129,7 +1242,7 @@ wss.on('connection', async (ws) => {
 });
 
 const PORT = process.env.PORT || 17000;
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', async () => {
   log('========================================');
   log('SERVER STARTED - FRESH LOGS');
   log('========================================');
@@ -1141,5 +1254,13 @@ server.listen(PORT, '0.0.0.0', () => {
   log(`API Base URL: ${XAI_BASE_URL}`);
   log(`Model: ${MODEL_NAME}`);
   log('========================================');
-});
 
+  // Initialize Qdrant database
+  log('Initializing Qdrant vector database...');
+  const dbInit = await initializeCollection();
+  if (dbInit.success) {
+    log('Qdrant database initialized successfully');
+  } else {
+    log(`Qdrant database initialization failed: ${dbInit.error}`, 'ERROR');
+  }
+});

@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { logger } from './lib/logger.js';
   import { marked } from 'marked';
+  import TestsPanel from './lib/TestsPanel.svelte';
 
   let ws = null;
   let connected = $state(false);
@@ -17,6 +18,10 @@
   let streamingMessages = $state(new Map());
   let expandedReasonings = $state(new Set());
   let expandedTasks = $state(new Set());
+
+  // Tests Panel state
+  let showTestsPanel = $state(false);
+  let selectedPastSession = $state(null);
 
   const WS_URL = 'ws://localhost:17000';
 
@@ -392,6 +397,12 @@
     expandedTasks = new Set(expandedTasks);
   }
 
+  function handleSessionSelect(session) {
+    selectedPastSession = session;
+    // TODO: Implement 3-panel view for displaying the selected session
+    logger.info('Selected session: ' + session.sessionId);
+  }
+
   // Group testing messages by task
   let groupedTaskMessages = $derived(() => {
     const groups = [];
@@ -640,6 +651,12 @@
               <option value="CANADA">Canada</option>
             </select>
           </div>
+          <button
+            class="tests-panel-btn"
+            onclick={() => showTestsPanel = true}
+          >
+            📊 View Past Tests
+          </button>
         </div>
         <div class="input-row">
           <textarea
@@ -758,6 +775,11 @@
     {/if}
   </div>
 </main>
+
+<TestsPanel
+  bind:visible={showTestsPanel}
+  onSessionSelect={handleSessionSelect}
+/>
 
 <style>
   :global(*) {
@@ -1657,10 +1679,6 @@
     font-weight: 500;
   }
 
-  .separator-text strong {
-    color: #e8d8d0;
-  }
-
   .task-end-marker {
     display: flex;
     align-items: center;
@@ -1762,6 +1780,27 @@
   .selector-group select:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .tests-panel-btn {
+    margin-left: auto;
+    padding: 8px 16px;
+    background: #d4a574;
+    color: #0a0e14;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tests-panel-btn:hover {
+    background: #e8d8d0;
+    transform: translateY(-1px);
   }
 
   .input-row {
